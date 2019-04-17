@@ -7,13 +7,12 @@
 #define MSG_RESPONSE 150
 #define MSG_SIZE 4
 #define NUMTHREADS 2
-#define MINIUM_PRIORITY 2147483647
 #define ID 0
 #define TL 1
 #define CR 2
 #define SEX 3
-#define K 10
-#define M 2
+#define K 10 //Klienci
+#define M 2  //Szafki
 
 typedef struct _LOCAL_QUEUE
 {
@@ -29,7 +28,6 @@ int msg[MSG_SIZE];
 MPI_Status status;
 
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
 void goChangeAndSwim(int rank)
 {
@@ -70,7 +68,7 @@ void entryTheCloakroom()
     msg[TL] = TLast;
     msg[CR] = Queue[rank].cloakroom;
     msg[SEX] = Queue[rank].type;
-    for (int i = 0; i < rank; i++)
+    for (int i = 0; i < size; i++)
     {
         if (i == rank)
         {
@@ -83,9 +81,9 @@ void entryTheCloakroom()
 int countPeopleInCloakroom()
 {
     int numberOfPeople = 0;
-    for (int i = 0; i < K; i++)
+    for (int i = 0; i < size; i++)
     {
-        if (Queue[i].TLast < TLast && Queue[i].cloakroom == Queue[rank].cloakroom)
+        if (Queue[i].cloakroom == Queue[rank].cloakroom && Queue[i].TLast < TLast && i != rank)
         {
             numberOfPeople++;
         }
@@ -93,10 +91,10 @@ int countPeopleInCloakroom()
     return numberOfPeople;
 }
 
-int countAcceptances()
+int queueSize()
 {
     int numberOfAcceptances = 0;
-    for (int i = 0; i < K; i++)
+    for (int i = 0; i < size; i++)
     {
         if (Queue[i].cloakroom != -1)
         {
@@ -106,14 +104,56 @@ int countAcceptances()
     return numberOfAcceptances;
 }
 
-//TODO coś do odbierania akceptacji?
+int isOtherSexInCloakroom()
+{
+    for (int i = 0; i < size; i++)
+    {
+        if (Queue[i].cloakroom == Queue[rank].cloakroom  && Queue[i].TLast < TLast && i != rank && Queue[i].type != Queue[rank].type)
+        {
+            return 1;
+        }pthread_mutex_lock
+    }
+    return 0;
+}
+
+void receiveAllAcceptances()
+{
+    while(1)
+    {
+        MPI_Recv(msg, MSG_SIZE, MPI_INT, MPI_ANY_SOURCE, MSG_RESPONSE, MPI_COMM_WORLD, &status);
+        int id_j = msg[ID];
+        Queue[id_j].TLast = msg[TL];
+        Queue[id_j].type = msg[SEX];
+        Queue[id_j].cloakroom = msg[CR];
+        if(!(isOtherSexInCloakroom()) && countPeopleInCloakroom() < M && countPeopleInCloakroom() == size))
+        {
+            break;
+        }
+    }
+}
+
+void sendInformationToEveryone()
+{
+    msg[ID] = rank;
+    msg[TL] = T;
+    msg[CR] = -2;
+    msg[SEX] = Queue[rank].type;
+    for (int i = 0; i < size; i++)
+    {
+        if (i == rank)
+        {
+            continue;
+        }
+        MPI_Send(msg, MSG_SIZE, MPI_INT, i, MSG_RESPONSE, MPI_COMM_WORLD);
+    }
+}
 
 void *receiver(void *arg)
 {
     while (1)
     {
-        MPI_Recv(msg, MSG_SIZE, MPI_INT, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-        //TODO: mutex?
+        MPI_Recv(msg, MSG_SIZE, MPI_INT, MPI_ANY_SOURCE, MSG_CR_REQUEST, MPI_COMM_WORLD, &status);
+        pthread_mutex_lock( &mutex );
         T = max(T, msg[TL]) + 1;
         int id_j = msg[ID];
         if (isQueueEmpty())
@@ -130,31 +170,20 @@ void *receiver(void *arg)
             msg[CR] = Queue[rank].cloakroom;
             msg[SEX] = Queue[rank].type;
         }
+        pthread_mutex_unlock( &mutex );
         MPI_Send(msg, MSG_SIZE, MPI_INT, id_j, MSG_RESPONSE, MPI_COMM_WORLD);
     }
 }
 
-void *sender(MPI_INT, (rank + 1) % size, MSG_HELLO, MPI_COMM_WORLD);
+void *sender(void *arg);
 {
     while (1)
     {
-        if (msg[0] == 10)
-        {
-            msg[1] = 1;
-            MPI_Send(msg, MSG_SIZE, MPI_INT, (rank + 1) % size, MSG_HELLO, MPI_COMM_WORLD);
-            break;
-        }
-        pthread_mutex_lock(&mutex);
-        while (visited != 1)
-        {
-            printf("%d: Blokowanie\n", rank);
-            pthread_cond_wait(&cond, &mutex);
-        }
-        printf("%d: Sekcja krytyczna\n", rank);
-        visited = 0;
-        msg[0]++;
-        doSmth(rank);
-        MPI_Send(msg, MSG_SIZE, MPI_INT, (rank + 1) % size, MSG_HELLO, MPI_COMM_WORLD);
+        entryTheCloakroom();
+        receiveAllAcceptances();
+        goChangeAndSwim();
+        sendInformationToEveryone();
+        emptyTheQueue();
     }
 }
 
@@ -167,23 +196,17 @@ int main(int argc, char **argv)
     i[0] = 1;
     pthread_t threads[NUMTHREADS];
 
-    msg[0] = 2;
-    msg[1] = 0;
-
     MPI_Init(&argc, &argv);
 
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+
     if (size >= 3 * M)
     {
         Queue[rank].type = chooseGender();
-        Queue[rank].cloakroom = -1;
+        emptyTheQueue();
         MPI_Get_processor_name(processor_name, &namelen);
         printf("Jestem %d z %d na %s\n", rank, size, processor_name);
-        if (rank == 0)
-        {
-            MPI_Send(msg, MSG_SIZE, MPI_INT, (rank + 1) % size, MSG_HELLO, MPI_COMM_WORLD);
-        }
         pthread_create(&threads[0], NULL, sender, (void *)i);
         pthread_create(&threads[1], NULL, receiver, (void *)i);
         pthread_join(threads[0], NULL);
